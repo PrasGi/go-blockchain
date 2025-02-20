@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Crypto Wallet</title>
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+    <!-- Sertakan Bootstrap Icons di head -->
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.3/font/bootstrap-icons.css"
+    />
+
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.4.1/jquery.min.js"></script>
+
+    <style>
+      :root {
+        --neon-cyan: #00f3ff;
+        --neon-purple: #bc13fe;
+        --dark-bg: #0a0a0f;
+      }
+
+      body {
+        background: radial-gradient(circle at center, #0a0a2f, #000000);
+        color: #ffffff;
+        min-height: 100vh;
+        font-family: "Segoe UI", system-ui, sans-serif;
+      }
+
+      .card {
+        background: rgba(10, 10, 15, 0.9);
+        border: 1px solid rgba(188, 19, 254, 0.3);
+        border-radius: 15px;
+        backdrop-filter: blur(10px);
+        box-shadow: 0 0 20px var(--neon-purple);
+        transition: all 0.3s ease;
+        position: relative;
+        overflow: hidden;
+      }
+
+      .card::before {
+        content: "";
+        position: absolute;
+        top: -2px;
+        left: -2px;
+        right: -2px;
+        bottom: -2px;
+        background: linear-gradient(
+          45deg,
+          var(--neon-purple),
+          var(--neon-cyan)
+        );
+        z-index: -1;
+        animation: glow 3s linear infinite;
+      }
+
+      @keyframes glow {
+        0% {
+          opacity: 0.8;
+        }
+        50% {
+          opacity: 0.5;
+        }
+        100% {
+          opacity: 0.8;
+        }
+      }
+
+      .card-title {
+        color: var(--neon-cyan);
+        text-shadow: 0 0 10px var(--neon-cyan);
+        font-weight: 700;
+        letter-spacing: 2px;
+      }
+
+      #wallet_amount {
+        font-size: 2.5rem;
+        color: var(--neon-cyan);
+        text-shadow: 0 0 15px var(--neon-cyan);
+        font-weight: bold;
+        animation: pulse 2s infinite;
+      }
+
+      @keyframes pulse {
+        0% {
+          transform: scale(1);
+        }
+        50% {
+          transform: scale(1.05);
+        }
+        100% {
+          transform: scale(1);
+        }
+      }
+
+      .form-control {
+        background: rgba(15, 15, 25, 0.8) !important;
+        border: 1px solid var(--neon-purple) !important;
+        color: var(--neon-cyan) !important;
+        transition: all 0.3s ease;
+      }
+
+      .form-control:focus {
+        box-shadow: 0 0 15px var(--neon-purple) !important;
+        border: 1px solid var(--neon-cyan) !important;
+        outline: none;
+      }
+
+      .btn-success,
+      .btn-primary {
+        background: linear-gradient(
+          45deg,
+          var(--neon-purple),
+          var(--neon-cyan)
+        );
+        border: none;
+        color: #fff;
+        font-weight: bold;
+        letter-spacing: 1px;
+        transition: all 0.3s ease;
+        text-transform: uppercase;
+      }
+
+      .btn-success:hover,
+      .btn-primary:hover {
+        transform: scale(1.05);
+        box-shadow: 0 0 20px var(--neon-cyan);
+      }
+
+      label {
+        color: var(--neon-cyan) !important;
+        text-shadow: 0 0 5px var(--neon-cyan);
+        font-weight: 600;
+      }
+
+      ::placeholder {
+        color: #6c757d !important;
+        opacity: 0.7 !important;
+      }
+    </style>
+
+    <script>
+      $(function () {
+        // Memuat data wallet awal
+        $.ajax({
+          url: "/wallet",
+          type: "POST",
+          success: function (response) {
+            $("#public_key").val(response["public_key"]);
+            $("#private_key").val(response["private_key"]);
+            $("#blockchain_address").val(response["blockchain_address"]);
+            console.info(response);
+          },
+          error: function (error) {
+            console.error(error);
+          },
+        });
+
+        // Tombol kirim dana
+        $("#send_money_button").click(function () {
+          let confirm_text = "Are you sure to send?";
+          let confirm_result = confirm(confirm_text);
+          if (confirm_result !== true) {
+            alert("Canceled");
+            return;
+          }
+
+          let transaction_data = {
+            sender_private_key: $("#private_key").val(),
+            sender_blockchain_address: $("#blockchain_address").val(),
+            recipient_blockchain_address: $("#recipient_blockchain_address").val(),
+            sender_public_key: $("#public_key").val(),
+            value: $("#send_amount").val(),
+          };
+
+          $.ajax({
+            url: "/transaction",
+            type: "POST",
+            contentType: "application/json",
+            data: JSON.stringify(transaction_data),
+            success: function (response) {
+              console.info(response, response.message);
+
+              if (response.message == "fail") {
+                alert("Send failed");
+                return;
+              }
+
+              alert("Send success");
+            },
+            error: function (response) {
+              console.error(response);
+              alert("Send failed");
+            },
+          });
+        });
+
+        // Fungsi reload amount
+        function reload_amount() {
+          let data = { blockchain_address: $("#blockchain_address").val() };
+          $.ajax({
+            url: "/wallet/amount",
+            type: "GET",
+            data: data,
+            success: function (response) {
+              let amount = response["amount"];
+              $("#wallet_amount").text(amount);
+              console.info(amount);
+            },
+            error: function (error) {
+              console.error(error);
+            },
+          });
+        }
+
+        // Tombol reload wallet
+        $("#reload_wallet").click(function () {
+          reload_amount();
+        });
+
+        // Reload otomatis setiap 1 detik
+        setInterval(reload_amount, 1000);
+      });
+    </script>
+  </head>
+  <body>
+    <div class="container py-5">
+      <!-- Satu row dengan dua kolom untuk menampilkan side-by-side -->
+      <div class="row g-5">
+        <!-- Kolom pertama: CRYPTO WALLET -->
+        <div class="col-md-6">
+          <div class="card h-100">
+            <div class="card-body">
+              <h3 class="card-title text-center mb-4">CRYPTO WALLET</h3>
+              <p class="text-center mb-1 neon-text">CURRENT BALANCE</p>
+              <h2 class="text-center mb-4" id="wallet_amount">0</h2>
+              <div class="d-grid gap-2 mb-4">
+                <button class="btn btn-success" id="reload_wallet">
+                  SYNC WALLET
+                </button>
+              </div>
+              <div class="mb-4">
+                <label class="form-label">PUBLIC KEY</label>
+                <textarea
+                  class="form-control"
+                  id="public_key"
+                  rows="2"
+                  readonly
+                ></textarea>
+              </div>
+              <div class="mb-4">
+                <label class="form-label" for="private_key">PRIVATE KEY</label>
+                <div class="input-group">
+                  <!-- Input -->
+                  <input
+                    type="password"
+                    class="form-control"
+                    id="private_key"
+                    readonly
+                  />
+                  <!-- Tombol Mata (button) -->
+                  <button
+                    class="btn btn-outline-light"
+                    type="button"
+                    id="togglePrivateKey"
+                  >
+                    <i class="bi bi-eye"></i>
+                  </button>
+                </div>
+              </div>
+              <div class="mb-4">
+                <label class="form-label">BLOCKCHAIN ADDRESS</label>
+                <input
+                  type="text"
+                  class="form-control"
+                  id="blockchain_address"
+                  readonly
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <!-- Kolom kedua: TRANSFER FUNDS -->
+        <div class="col-md-6">
+          <div class="card h-100">
+            <div class="card-body">
+              <h3 class="card-title text-center mb-4">TRANSFER FUNDS</h3>
+              <div class="mb-4">
+                <label class="form-label">RECIPIENT ADDRESS</label>
+                <input
+                  type="text"
+                  class="form-control"
+                  id="recipient_blockchain_address"
+                  placeholder="0x..."
+                />
+              </div>
+              <div class="mb-4">
+                <label class="form-label">AMOUNT</label>
+                <input
+                  type="number"
+                  class="form-control"
+                  id="send_amount"
+                  placeholder="0.00"
+                />
+              </div>
+              <div class="d-grid gap-2">
+                <button class="btn btn-primary" id="send_money_button">
+                  SEND TRANSACTION
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bootstrap Bundle JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- Script toggle password -->
+    <script>
+      document.getElementById("togglePrivateKey").addEventListener("click", function () {
+        const input = document.getElementById("private_key");
+        if (input.type === "password") {
+          input.type = "text";
+          this.innerHTML = '<i class="bi bi-eye-slash"></i>';
+        } else {
+          input.type = "password";
+          this.innerHTML = '<i class="bi bi-eye"></i>';
+        }
+      });
+    </script>
+  </body>
+</html>
