@@ -1,12 +1,15 @@
 package block
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"learn-blockchain/utils"
 	"log"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +20,12 @@ const (
 	MINING_SENDER     = "THE BLOCKCHAIN"
 	MINING_REWARD     = 1.0
 	MINING_TIMER_SEC  = 20
+
+	BLOCKCHAIN_PORT_RANGE_START       = 5000
+	BLOCKCHAIN_PORT_RANGE_END         = 5003
+	NEIGHBOR_IP_RANGE_START           = 0
+	NEIGHBOR_IP_RANGE_END             = 1
+	BLOCKCHAIN_NEIGHBOR_SYNC_TIME_SEC = 20
 )
 
 type Block struct {
@@ -33,6 +42,18 @@ func CreateNewBlock(nonce int, previosHash [32]byte, transactions []*Transaction
 	block.previousHash = previosHash
 	block.transactions = transactions
 	return block
+}
+
+func (b *Block) PreviousHash() [32]byte {
+	return b.previousHash
+}
+
+func (b *Block) Nonce() int {
+	return b.nonce
+}
+
+func (b *Block) Transactions() []*Transaction {
+	return b.transactions
 }
 
 func (block *Block) Print() {
@@ -65,12 +86,36 @@ func (block *Block) MarshalJSON() ([]byte, error) {
 	})
 }
 
+func (b *Block) UnmarshalJSON(data []byte) error {
+	var previousHash string
+	v := &struct {
+		Timestamp    *int64          `json:"timestamp"`
+		Nonce        *int            `json:"nonce"`
+		PreviousHash *string         `json:"previous_hash"`
+		Transactions *[]*Transaction `json:"transactions"`
+	}{
+		Timestamp:    &b.timestamp,
+		Nonce:        &b.nonce,
+		PreviousHash: &previousHash,
+		Transactions: &b.transactions,
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	ph, _ := hex.DecodeString(*v.PreviousHash)
+	copy(b.previousHash[:], ph[:32])
+	return nil
+}
+
 type Blockchain struct {
 	transactionPool   []*Transaction
 	chain             []*Block
 	blockchainAddress string
 	port              uint16
 	mux               sync.Mutex
+
+	neighbors    []string
+	muxNeighbors sync.Mutex
 }
 
 func NewBlockchain(blockchainAddress string, port uint16) *Blockchain {
@@ -83,22 +128,77 @@ func NewBlockchain(blockchainAddress string, port uint16) *Blockchain {
 	return blockchain
 }
 
+func (bc *Blockchain) Chain() []*Block {
+	return bc.chain
+}
+
+func (bc *Blockchain) Run() {
+	if bc == nil {
+		log.Fatal("Blockchain is nil, cannot run!")
+	}
+	bc.StartSyncNeighbors()
+	bc.ResolveConflicts()
+}
+
+func (bc *Blockchain) SetNeighbors() {
+	bc.neighbors = utils.FindNeighbors(
+		utils.GetHost(), bc.port,
+		NEIGHBOR_IP_RANGE_START, NEIGHBOR_IP_RANGE_END,
+		BLOCKCHAIN_PORT_RANGE_START, BLOCKCHAIN_PORT_RANGE_END)
+	log.Printf("%v", bc.neighbors)
+}
+
+func (bc *Blockchain) SyncNeighbors() {
+	log.Printf("Syncing neighbors for blockchain at port %d", bc.port)
+	bc.muxNeighbors.Lock()
+	defer bc.muxNeighbors.Unlock()
+	bc.SetNeighbors()
+}
+
+func (bc *Blockchain) StartSyncNeighbors() {
+	bc.SyncNeighbors()
+	_ = time.AfterFunc(time.Second*BLOCKCHAIN_NEIGHBOR_SYNC_TIME_SEC, bc.StartSyncNeighbors)
+}
+
 func (bc *Blockchain) TransactionPool() []*Transaction {
 	return bc.transactionPool
 }
 
+func (bc *Blockchain) ClearTransactionPool() {
+	bc.transactionPool = bc.transactionPool[:0]
+}
+
 func (bc *Blockchain) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Blocks []*Block `json:"chains"`
+		Blocks []*Block `json:"chain"`
 	}{
 		Blocks: bc.chain,
 	})
+}
+
+func (bc *Blockchain) UnmarshalJSON(data []byte) error {
+	v := &struct {
+		Blocks *[]*Block `json:"chain"`
+	}{
+		Blocks: &bc.chain,
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (blockchain *Blockchain) CreateBlock(nonce int, previosHash [32]byte) *Block {
 	block := CreateNewBlock(nonce, previosHash, blockchain.transactionPool)
 	blockchain.chain = append(blockchain.chain, block)
 	blockchain.transactionPool = []*Transaction{}
+	for _, n := range blockchain.neighbors {
+		endpoint := fmt.Sprintf("http://%s/transactions", n)
+		client := &http.Client{}
+		req, _ := http.NewRequest("DELETE", endpoint, nil)
+		resp, _ := client.Do(req)
+		log.Printf("%v", resp)
+	}
 
 	return block
 }
@@ -120,8 +220,23 @@ func (bc *Blockchain) CreateTransaction(sender string, recipient string, value f
 	senderPublicKey *ecdsa.PublicKey, s *utils.Signature) bool {
 	isTransacted := bc.AddTransaction(sender, recipient, value, senderPublicKey, s)
 
-	// TODO
-	// Sync
+	if isTransacted {
+		log.Printf("Neighbors before syncing transaction: %v", bc.neighbors)
+		for _, n := range bc.neighbors {
+			publicKeyStr := fmt.Sprintf("%064x%064x", senderPublicKey.X.Bytes(),
+				senderPublicKey.Y.Bytes())
+			signatureStr := s.String()
+			bt := &TransactionRequest{
+				&sender, &recipient, &publicKeyStr, &value, &signatureStr}
+			m, _ := json.Marshal(bt)
+			buf := bytes.NewBuffer(m)
+			endpoint := fmt.Sprintf("http://%s/transactions", n)
+			client := &http.Client{}
+			req, _ := http.NewRequest("PUT", endpoint, buf)
+			resp, _ := client.Do(req)
+			log.Printf("%v", resp)
+		}
+	}
 
 	return isTransacted
 }
@@ -190,15 +305,38 @@ func (bc *Blockchain) Mining() bool {
 	bc.mux.Lock()
 	defer bc.mux.Unlock()
 
-	if len(bc.transactionPool) == 0 {
-		return false
-	}
+	// if len(bc.transactionPool) == 0 {
+	// 	return false
+	// }
 
 	bc.AddTransaction(MINING_SENDER, bc.blockchainAddress, MINING_REWARD, nil, nil)
 	nonce := bc.ProofOfWork()
 	previousHash := bc.LastBlock().Hash()
 	bc.CreateBlock(nonce, previousHash)
 	log.Println("action=mining, status=success")
+
+	for _, n := range bc.neighbors {
+		endpoint := fmt.Sprintf("http://%s/consensus", n)
+		client := &http.Client{}
+
+		// Membuat permintaan PUT
+		req, err := http.NewRequest("PUT", endpoint, nil)
+		if err != nil {
+			log.Printf("Error creating request to %s: %v", n, err)
+			continue
+		}
+
+		// Mengirim permintaan
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("Error sending request to %s: %v", n, err)
+			continue
+		}
+		defer resp.Body.Close() // Menutup body respons setelah selesai
+
+		// Mencatat status respons
+		log.Printf("Response from %s: %s", n, resp.Status)
+	}
 	return true
 }
 
@@ -222,6 +360,116 @@ func (bc *Blockchain) CalculateTotalAmount(blockchainAddress string) float32 {
 		}
 	}
 	return totalAmount
+}
+
+func (bc *Blockchain) ValidChain(chain []*Block) bool {
+	// Log awal proses validasi
+	log.Printf("Validating chain with length %d", len(chain))
+
+	// Jika rantai kosong atau hanya satu blok, anggap valid (tergantung kebutuhan)
+	if len(chain) <= 1 {
+		log.Printf("Chain has 0 or 1 block, considered valid by default")
+		return true
+	}
+
+	preBlock := chain[0]
+	currentIndex := 1
+
+	// Log blok awal
+	log.Printf("Starting with block 0 - Hash: %x", preBlock.Hash())
+
+	for currentIndex < len(chain) {
+		b := chain[currentIndex]
+		log.Printf("Checking block %d - PreviousHash: %x, Hash: %x", currentIndex, b.previousHash, b.Hash())
+
+		// Validasi hash sebelumnya
+		if b.previousHash != preBlock.Hash() {
+			log.Printf("Chain invalid: Previous hash mismatch at block %d. Expected %x, got %x",
+				currentIndex, preBlock.Hash(), b.previousHash)
+			return false
+		}
+		log.Printf("Block %d: Previous hash valid", currentIndex)
+
+		// Validasi bukti kerja
+		if !bc.ValidProof(b.Nonce(), b.PreviousHash(), b.Transactions(), MINING_DIFFICULTY) {
+			log.Printf("Chain invalid: Proof of work invalid at block %d. Nonce: %d, Transactions: %d",
+				currentIndex, b.Nonce(), len(b.Transactions()))
+			return false
+		}
+		log.Printf("Block %d: Proof of work valid", currentIndex)
+
+		preBlock = b
+		currentIndex += 1
+	}
+
+	log.Printf("Chain validation successful")
+	return true
+}
+
+func (bc *Blockchain) ResolveConflicts() bool {
+	// Spasi sebelum log fungsi dimulai
+	log.Println("=====================================")
+	log.Println("Starting ResolveConflicts process")
+
+	var longestChain []*Block = nil
+	maxLength := len(bc.chain)
+
+	// Log panjang rantai lokal saat ini
+	log.Printf("Current local chain length: %d", maxLength)
+
+	for _, n := range bc.neighbors {
+		endpoint := fmt.Sprintf("http://%s/chain", n)
+
+		// Mengirim HTTP GET request
+		resp, err := http.Get(endpoint)
+		if err != nil {
+			log.Printf("Failed to get chain from %s: %v", n, err)
+			continue
+		}
+		defer resp.Body.Close() // Pastikan body ditutup
+
+		// Log status respons
+		log.Printf("Response from %s: %s", n, resp.Status)
+
+		if resp.StatusCode == 200 {
+			var bcResp Blockchain
+			decoder := json.NewDecoder(resp.Body)
+			err := decoder.Decode(&bcResp)
+			if err != nil {
+				log.Printf("Failed to decode chain from %s: %v", n, err)
+				continue
+			}
+
+			chain := bcResp.Chain()
+			chainLength := len(chain)
+
+			// Log detail rantai yang diterima
+			log.Printf("Chain received from %s - Length: %d", n, chainLength)
+
+			if chainLength > maxLength && bc.ValidChain(chain) {
+				log.Printf("Found longer valid chain from %s - New length: %d", n, chainLength)
+				maxLength = chainLength
+				longestChain = chain
+			} else {
+				log.Printf("Chain from %s not longer or invalid - Length: %d", n, chainLength)
+			}
+		} else {
+			log.Printf("Non-200 response from %s: %s", n, resp.Status)
+		}
+	}
+
+	// Menentukan hasil akhir
+	if longestChain != nil {
+		bc.chain = longestChain
+		log.Printf("Resolve conflicts: Chain replaced with length %d", len(longestChain))
+		log.Println("ResolveConflicts process completed")
+		log.Println("=====================================")
+		return true
+	}
+	log.Printf("Resolve conflicts: Chain not replaced, keeping length %d", maxLength)
+	log.Println("ResolveConflicts process completed")
+	log.Println("=====================================")
+	return false
 }
 
 type Transaction struct {
@@ -255,6 +503,22 @@ func (t *Transaction) MarshalJSON() ([]byte, error) {
 		Recipient: t.recipientBlockchainAddress,
 		Value:     t.value,
 	})
+}
+
+func (t *Transaction) UnmarshalJSON(data []byte) error {
+	v := &struct {
+		Sender    *string  `json:"sender_blockchain_address"`
+		Recipient *string  `json:"recipient_blockchain_address"`
+		Value     *float32 `json:"value"`
+	}{
+		Sender:    &t.senderBlockchainAddress,
+		Recipient: &t.recipientBlockchainAddress,
+		Value:     &t.value,
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	return nil
 }
 
 type TransactionRequest struct {
